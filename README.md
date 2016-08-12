@@ -1,7 +1,12 @@
-# Blockwise Compressed Data
+# PB's Dataset
 
-BCD is a data format for storing
-individually compressed blocks of data.
+dset is a data format for storing
+for storing structured data
+in a blockwise compressed format.
 
-This is helpful when processing large files parallely,
-or when trying to seek to a part of the compressed file.
+This is an archival format
+for storing large amounts of structured data.
+As the data is indexed an compressed blockwise,
+it is easy to retrieve any section of it easily.
+This is should also be helpful
+when processing the data stored in parallel.
