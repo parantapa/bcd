@@ -76,21 +76,13 @@ DEFAULT_PARAMS = {
     "subdir": False,
     "readonly": True,
     "lock": True,
-    "max_dbs": 3
+    "max_dbs": 2,
+    # "sync": False,
+    # "metasync": False
 }
 
 def idx_bin(i):
     return struct.pack("> I", i)
-
-def key_bin(k):
-    if isinstance(k, (int, long)):
-        return struct.pack("> I", k)
-    elif isinstance(k, str):
-        return k
-    elif isinstance(k, unicode):
-        return k.encode("utf-8")
-    else:
-        raise ValueError("Invalid key type")
 
 class BlockHeader(object): # pylint: disable=too-few-public-methods
     """
@@ -139,7 +131,7 @@ def load_block(env, block_db, decomp_fn, i):
     block = unpack(block_raw)
     return block
 
-def dump_block(env, block_db, key_db, comp_fn, comp_level, i, block, keys):
+def dump_block(env, block_db, comp_fn, comp_level, i, block):
     """
     Write the block to the store.
     """
@@ -161,21 +153,12 @@ def dump_block(env, block_db, key_db, comp_fn, comp_level, i, block, keys):
     with env.begin(block_db, write=True) as txn:
         txn.put(i_bin, buf)
 
-    # Dont start key transaction if not necessary
-    if not keys:
-        return
-
-    with env.begin(key_db, write=True) as txn:
-        for key, idx in keys:
-            key, idx = key_bin(key), pack(idx)
-            txn.put(key, idx)
-
 class DatasetReader(object):
     """
     Read entries from a dataset file.
     """
 
-    def __init__(self, fname, lock=True):
+    def __init__(self, fname, lock=False):
         self.closed = True
 
         self.fname = fname
@@ -185,7 +168,6 @@ class DatasetReader(object):
         self.env = lmdb.open(self.fname, **params)
         try:
             self.meta_db = self.env.open_db("meta", create=False)
-            self.key_db = self.env.open_db("key", create=False)
             self.block_db = self.env.open_db("block", create=False)
 
             with self.env.begin(self.meta_db) as txn:
@@ -254,18 +236,6 @@ class DatasetReader(object):
             self.cur_block_idx = i
         return unpack(self.cur_block[j])
 
-    def get_key(self, k):
-        """
-        Get the value associated with the given key.
-        """
-
-        k_bin = key_bin(k)
-
-        with self.env.begin(self.key_db) as txn:
-            i = unpack(txn.get(k_bin))
-
-        return self.get_idx(i)
-
 class DatasetWriter(object):
     """
     Writes a dataset object to a file.
@@ -291,7 +261,6 @@ class DatasetWriter(object):
         self.env = lmdb.open(self.fname, **params)
         try:
             self.meta_db = self.env.open_db("meta")
-            self.key_db = self.env.open_db("key")
             self.block_db = self.env.open_db("block")
 
             with self.env.begin(self.meta_db) as txn:
@@ -321,7 +290,6 @@ class DatasetWriter(object):
             self.cur_block_idx -= 1
         else:
             self.cur_block = []
-        self.cur_keys = []
 
     def write_meta(self):
         """
@@ -344,12 +312,12 @@ class DatasetWriter(object):
 
         return load_block(self.env, self.block_db, self.decomp_fn, i)
 
-    def dump_block(self, i, block, keys):
+    def dump_block(self, i, block):
         """
         Write the block to the store.
         """
 
-        dump_block(self.env, self.block_db, self.key_db, self.comp_fn, self.comp_level, i, block, keys)
+        dump_block(self.env, self.block_db, self.comp_fn, self.comp_level, i, block)
 
     def flush(self, force=False):
         """
@@ -362,21 +330,18 @@ class DatasetWriter(object):
         if not self.cur_block:
             return
 
-        # Dump the current block and the keys
-        self.dump_block(self.cur_block_idx, self.cur_block, self.cur_keys)
+        # Dump the current block
+        self.dump_block(self.cur_block_idx, self.cur_block)
 
         self.cur_block_idx += 1
         self.cur_block = []
-        self.cur_keys = []
 
-    def append(self, obj, key=None):
+    def append(self, obj):
         """
         Append the object to database.
         """
 
         self.cur_block.append(pack(obj))
-        if key is not None:
-            self.cur_keys.append((key, self.length))
         self.length += 1
 
         if len(self.cur_block) == self.block_length:
@@ -387,6 +352,7 @@ class DatasetWriter(object):
             self.flush(force=True)
             self.write_meta()
 
+            self.env.sync(True)
             self.env.close()
             self.closed = True
 
@@ -407,9 +373,11 @@ def open(fname, mode="r", block_length=None, comp_format="lz4", comp_level=6):
 
     if mode == "r":
         return DatasetReader(fname)
-    elif mode == "w" or mode == "a":
+    elif mode == "w":
         if block_length is None:
             raise ValueError("Must specify block_length for write mode")
         return DatasetWriter(fname, block_length, comp_format, comp_level)
+    elif mode == "a":
+        return DatasetWriter(fname)
     else:
         raise ValueError("Invalid mode '%s'" % mode)
