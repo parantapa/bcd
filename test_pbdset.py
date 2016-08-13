@@ -112,7 +112,6 @@ def test_append_mode_3parts(tmpdir, test_data, block_length):
         n1 = random.randint(0, len(test_data) - 1)
         n2 = random.randint(n1, len(test_data) - 1)
 
-
         # Randomly split input data into two parts
         part1 = test_data[:n1]
         part2 = test_data[n1:n2]
@@ -147,6 +146,12 @@ def test_empty_read_raises(tmpdir):
 
     with pytest.raises(IOError):
         with ds.open(fname, "a"):
+            pass
+
+    with ds.open(fname, "w", 1):
+        pass
+    with pytest.raises(IOError):
+        with ds.open(fname, "w", 1):
             pass
 
 def test_append_mode_crash(tmpdir, test_data, block_length):

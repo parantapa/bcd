@@ -128,6 +128,9 @@ def load_block(env, block_db, decomp_fn, i):
         block_raw = decomp_fn(block_comp)
         block_chksum = checksum(block_raw)
 
+    if len(block_raw) != header.raw_size:
+        raise IOError("Block %d: Size mismatch: %d != %d"
+                      % (i, len(block_raw), header.raw_size))
     if block_chksum != header.chksum:
         raise IOError("Block %d: Checksum mismatch: %0x != %0x"
                       % (i, block_chksum, header.chksum))
@@ -337,7 +340,10 @@ class DatasetWriter(object):
         if not 1 <= comp_level <= 9:
             raise ValueError("Invalid compression level: %d" % comp_level)
 
-        if not create and not os.path.exists(fname):
+        _exists = os.path.exists(fname)
+        if create and _exists:
+            raise IOError("File '%s' already exists" % fname)
+        if not create and not _exists:
             raise IOError("File '%s' doesn't exist" % fname)
 
         self.fname = fname
