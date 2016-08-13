@@ -17,6 +17,8 @@
 Read and write PB's Dataset files.
 """
 
+import os.path
+
 import struct
 import lmdb
 
@@ -118,6 +120,8 @@ def load_block(env, block_db, decomp_fn, i):
 
     with env.begin(block_db, buffers=True) as txn:
         buf = txn.get(i_bin)
+        if buf is None:
+            raise IOError("Block %d: doesn't exist" % i)
         header = BlockHeader.frombuf(buf)
 
         block_comp = buffer(buf, BlockHeader.size, header.comp_size)
@@ -161,6 +165,9 @@ class DatasetReader(object):
     def __init__(self, fname, lock=False):
         self.closed = True
 
+        if not os.path.exists(fname):
+            raise IOError("File '%s' doesn't exist" % fname)
+
         self.fname = fname
 
         params = dict(DEFAULT_PARAMS)
@@ -191,10 +198,21 @@ class DatasetReader(object):
             self.env.close()
             raise
 
+        # number of blocks already present in the dataset
+        self.num_blocks  = self.length // self.block_length
+        self.num_blocks += bool(self.length % self.block_length)
+
         # NOTE: Only used by get_idx
         # get_idxs and get_slice use their own local block storage
         self.cur_block_idx = -1
         self.cur_block = None
+
+    def load_block(self, i):
+        """
+        Load a block from the given file.
+        """
+
+        return load_block(self.env, self.block_db, self.decomp_fn, i)
 
     def close(self):
         if not self.closed:
@@ -209,13 +227,6 @@ class DatasetReader(object):
 
     def __exit__(self, exc_type, exc_value, traceback):
         self.close()
-
-    def load_block(self, i):
-        """
-        Load a block from the given file.
-        """
-
-        return load_block(self.env, self.block_db, self.decomp_fn, i)
 
     def __len__(self):
         return self.length
@@ -236,12 +247,84 @@ class DatasetReader(object):
             self.cur_block_idx = i
         return unpack(self.cur_block[j])
 
+    def get_slice(self, *args):
+        """
+        Return iterable for the given range.
+        """
+
+        _block_length = self.block_length
+
+        start, stop, step = slice(*args).indices(self.length)
+
+        # Find the number of items in slice
+        n = (stop - start) // step
+        if n <= 0:
+            return
+
+        # Check if begin and end indexes are in range
+        if start < 0 or start >= self.length:
+            raise IndexError("Index out of range")
+        end = start + (n - 1) * step
+        if end < 0 or end >= self.length:
+            raise IndexError("Index out of range")
+
+        # Do the actual loop
+        # This doesn't use the class's cur_block
+        cur_block_idx = -1
+        cur_block = None
+        for n in xrange(start, stop, step):
+            i = n // _block_length
+            j = n % _block_length
+            if cur_block_idx != i:
+                cur_block = self.load_block(i)
+                cur_block_idx = i
+            yield unpack(cur_block[j])
+
+    def get_idxs(self, ns):
+        """
+        Get the values at given idxs.
+
+        NOTE: if the indexes are not sorted,
+        performance may be really slow.
+        """
+
+        _block_length = self.block_length
+
+        cur_block_idx = -1
+        cur_block = None
+        for n in ns:
+            n = (self.length + n) if n < 0 else n
+            if n < 0 or n >= self.length:
+                raise IndexError("Index out of range")
+
+            i = n // _block_length
+            j = n % _block_length
+            if cur_block_idx != i:
+                cur_block = self.load_block(i)
+                cur_block_idx = i
+            yield unpack(cur_block[j])
+
+    def __iter__(self):
+        for i in xrange(self.num_blocks):
+            cur_block = self.load_block(i)
+            for item in cur_block:
+                yield unpack(item)
+
+    def __getitem__(self, key):
+        if isinstance(key, slice):
+            return list(self.get_slice(key.start, key.stop, key.step))
+        elif isinstance(key, (list, tuple)):
+            return list(self.get_idxs(key))
+        else:
+            return self.get_idx(key)
+
 class DatasetWriter(object):
     """
     Writes a dataset object to a file.
     """
 
-    def __init__(self, fname, block_length=1, comp_format="lz4", comp_level=6):
+    def __init__(self, fname, create=True, block_length=1,
+                 comp_format="lz4", comp_level=6):
         self.closed = True
 
         # Check the parameters
@@ -253,6 +336,9 @@ class DatasetWriter(object):
         comp_level = int(comp_level)
         if not 1 <= comp_level <= 9:
             raise ValueError("Invalid compression level: %d" % comp_level)
+
+        if not create and not os.path.exists(fname):
+            raise IOError("File '%s' doesn't exist" % fname)
 
         self.fname = fname
 
@@ -277,33 +363,23 @@ class DatasetWriter(object):
                 self.comp_fn = COMP_TABLE[self.comp_format]
                 self.decomp_fn = DECOMP_TABLE[self.comp_format]
 
-            self.write_meta()
+            if self.length == 0:
+                self.write_meta(True)
 
             self.closed = False
         except:
             self.env.close()
             raise
 
-        self.cur_block_idx = self.length // self.block_length
-        if self.length % self.block_length != 0:
-            self.cur_block = self.load_block(self.cur_block_idx)
-            self.cur_block_idx -= 1
-        else:
+        # number of blocks already present in the dataset
+        self.num_blocks  = self.length // self.block_length
+        self.num_blocks += bool(self.length % self.block_length)
+
+        if self.length % self.block_length == 0:
             self.cur_block = []
-
-    def write_meta(self):
-        """
-        Write meta information.
-        """
-
-        with self.env.begin(self.meta_db, write=True) as txn:
-            txn.put("version", pack(VERSION))
-
-            txn.put("block_length", pack(self.block_length))
-            txn.put("length", pack(self.length))
-
-            txn.put("comp_format", pack(self.comp_format))
-            txn.put("comp_level", pack(self.comp_level))
+        else:
+            self.cur_block = self.load_block(self.num_blocks -1)
+            self.num_blocks -= 1
 
     def load_block(self, i):
         """
@@ -319,6 +395,20 @@ class DatasetWriter(object):
 
         dump_block(self.env, self.block_db, self.comp_fn, self.comp_level, i, block)
 
+    def write_meta(self, full=False):
+        """
+        Write meta information.
+        """
+
+        with self.env.begin(self.meta_db, write=True) as txn:
+            if full:
+                txn.put("version", pack(VERSION))
+                txn.put("block_length", pack(self.block_length))
+                txn.put("comp_format", pack(self.comp_format))
+                txn.put("comp_level", pack(self.comp_level))
+
+            txn.put("length", pack(self.length))
+
     def flush(self, force=False):
         """
         Flush the current block to output file.
@@ -331,26 +421,15 @@ class DatasetWriter(object):
             return
 
         # Dump the current block
-        self.dump_block(self.cur_block_idx, self.cur_block)
+        self.dump_block(self.num_blocks, self.cur_block)
+        self.write_meta()
 
-        self.cur_block_idx += 1
+        self.num_blocks += 1
         self.cur_block = []
-
-    def append(self, obj):
-        """
-        Append the object to database.
-        """
-
-        self.cur_block.append(pack(obj))
-        self.length += 1
-
-        if len(self.cur_block) == self.block_length:
-            self.flush()
 
     def close(self):
         if not self.closed:
             self.flush(force=True)
-            self.write_meta()
 
             self.env.sync(True)
             self.env.close()
@@ -365,6 +444,25 @@ class DatasetWriter(object):
     def __exit__(self, exc_type, exc_value, traceback):
         self.close()
 
+    def append(self, obj):
+        """
+        Append the object to database.
+        """
+
+        self.cur_block.append(pack(obj))
+        self.length += 1
+
+        if len(self.cur_block) == self.block_length:
+            self.flush()
+
+    def extend(self, iterable):
+        for item in iterable:
+            self.cur_block.append(pack(item))
+            self.length += 1
+
+            if len(self.cur_block) == self.block_length:
+                self.flush()
+
 def open(fname, mode="r", block_length=None, comp_format="lz4", comp_level=6):
     # pylint: disable=redefined-builtin
     """
@@ -376,8 +474,8 @@ def open(fname, mode="r", block_length=None, comp_format="lz4", comp_level=6):
     elif mode == "w":
         if block_length is None:
             raise ValueError("Must specify block_length for write mode")
-        return DatasetWriter(fname, block_length, comp_format, comp_level)
+        return DatasetWriter(fname, True, block_length, comp_format, comp_level)
     elif mode == "a":
-        return DatasetWriter(fname)
+        return DatasetWriter(fname, False)
     else:
         raise ValueError("Invalid mode '%s'" % mode)
