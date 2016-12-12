@@ -1,6 +1,0 @@
-lmdb
-msgpack-python
-lz4
-backports.lzma
-# pytest
-# pytest-cov

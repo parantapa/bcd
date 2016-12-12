@@ -1,6 +1,6 @@
 # PB's Dataset
 
-dset is a data format for storing
+pbdset is a data format
 for storing structured data
 in a blockwise compressed format.
 
