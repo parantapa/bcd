@@ -21,22 +21,28 @@ def comp_level(request):
 def block_length(request):
     return request.param
 
+@pytest.fixture(params=[1, 2, 5])
+def num_workers(request):
+    return request.param
+
 @pytest.fixture(params=[1000, 1001, 10000, 10001])
 def test_data(request):
     return range(request.param)
 
-def test_simple(tmpdir, test_data, block_length, comp_format, comp_level):
+def test_simple(tmpdir, test_data, block_length,
+                comp_format, comp_level, num_workers):
     """
     Simple dset test.
     """
 
-    fname = "test-%s-%d.dset" % (comp_format, comp_level)
+    fname = "test-%s-%d-%d.dset" % (comp_format, comp_level, num_workers)
     fname = tmpdir.join(fname).strpath
 
     params = {
         "block_length": block_length,
         "comp_format": comp_format,
         "comp_level": comp_level,
+        "num_workers": num_workers,
     }
 
     with ds.open(fname, "w", **params) as dset:
@@ -205,7 +211,7 @@ def test_get_idx(tmpdir, test_data, block_length):
             assert test_data[-i] == dset.get_idx(-i)
             assert test_data[-i] == dset[-i]
 
-def test_get_idxs(tmpdir, test_data, block_length):
+def test_get_idxs(tmpdir, test_data, block_length, num_workers):
     """
     Test the multiple index version.
     """
@@ -224,14 +230,14 @@ def test_get_idxs(tmpdir, test_data, block_length):
             idxs = random.sample(all_idxs, len(all_idxs) // 10)
             idxs = sorted(idxs)
 
-            vals = dset.get_idxs(idxs)
+            vals = dset.get_idxs(idxs, num_workers=num_workers)
             for i, v in zip(idxs, vals):
                 assert test_data[i] == v
             vals = dset[idxs]
             for i, v in zip(idxs, vals):
                 assert test_data[i] == v
 
-def test_get_slice(tmpdir, test_data, block_length):
+def test_get_slice(tmpdir, test_data, block_length, num_workers):
     """
     Test slice version.
     """
@@ -249,13 +255,13 @@ def test_get_slice(tmpdir, test_data, block_length):
         for _ in xrange(10):
             n = random.choice(all_idxs)
 
-            assert test_data[:n] == list(dset.get_slice(None, n))
+            assert test_data[:n] == list(dset.get_slice(None, n, num_workers=num_workers))
             assert test_data[:n] == dset[:n]
 
-            assert test_data[n:] == list(dset.get_slice(n, None))
+            assert test_data[n:] == list(dset.get_slice(n, None, num_workers=num_workers))
             assert test_data[n:] == dset[n:]
 
-def test_get_slice_wstep(tmpdir, test_data, block_length):
+def test_get_slice_wstep(tmpdir, test_data, block_length, num_workers):
     """
     Test slice version with steps.
     """
@@ -288,5 +294,5 @@ def test_get_slice_wstep(tmpdir, test_data, block_length):
 
             stop = stop + step
 
-            assert test_data[start:stop:step] == list(dset.get_slice(start, stop, step))
+            assert test_data[start:stop:step] == list(dset.get_slice(start, stop, step, num_workers=num_workers))
             assert test_data[start:stop:step] == dset[start:stop:step]

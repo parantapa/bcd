@@ -13,11 +13,6 @@ setup(
         'backports.lzma'
     ],
 
-    setup_requires=['pytest-runner'],
-
-    # Use dev_requirements.txt instead
-    # tests_require=['pytest', 'pytest-cov'],
-
     author="Parantapa Bhattacharya",
     author_email="pb [at] parantapa [dot] net",
 
