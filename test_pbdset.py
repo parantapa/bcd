@@ -178,8 +178,9 @@ def test_append_mode_crash(tmpdir, test_data, block_length):
 
             # This should stop the close function
             # from doing its job
-            dset.env.close()
             dset.closed = True
+            dset.store.closed = True
+            dset.store.env.close()
 
         # We should get back the first part intact
         with ds.open(fname) as dset:

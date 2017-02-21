@@ -1,5 +1,6 @@
 .eggs/ 
-PBDset.egg-info/
 .coverage
 .cache/
+PBDset.egg-info/
 htmlcov/
+venv/

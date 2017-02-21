@@ -1,5 +1,6 @@
 # encoding: utf-8
 # pylint: disable=too-many-instance-attributes
+# pylint: disable=attribute-defined-outside-init
 #
 #            ____________________/\
 #            \______   \______   )/______
@@ -25,7 +26,9 @@ import lmdb
 # Import comression/decompression functions
 from zlib import compress as zlib_comp, decompress as zlib_decomp
 from lz4 import compress as _lz4_comp, decompress as lz4_decomp
-from backports.lzma import compress as _xz_comp, decompress as _xz_decomp, CHECK_NONE
+from backports.lzma import compress as _xz_comp, \
+                           decompress as _xz_decomp, \
+                           CHECK_NONE
 
 def lz4_comp(data, _):
     return _lz4_comp(data)
@@ -73,132 +76,159 @@ DECOMP_TABLE = {
 
 VERSION = 0.1
 
-DEFAULT_PARAMS = {
-    "map_size": 2 ** 40,
-    "subdir": False,
-    "readonly": True,
-    "lock": True,
-    "max_dbs": 2,
-    # "sync": False,
-    # "metasync": False
-}
-
-def idx_bin(i):
-    return struct.pack("> I", i)
-
-class BlockHeader(object): # pylint: disable=too-few-public-methods
+class Closes(object): # pylint: disable=too-few-public-methods
     """
-    Simple struct class to represent blocksize.
+    Runs close() on context exiting and garbage collection.
     """
 
-    fmt = struct.Struct("< I I I")
-    size = fmt.size
+    def __del__(self):
+        self.close()
 
-    def __init__(self, raw_size, comp_size, chksum):
-        self.raw_size = raw_size
-        self.comp_size = comp_size
-        self.chksum = chksum
+    def __enter__(self):
+        return self
 
-    @classmethod
-    def frombuf(cls, buf):
-        vals = cls.fmt.unpack_from(buf)
-        return cls(*vals)
+    def __exit__(self, exc_type, exc_value, tb):
+        self.close()
 
-    def __str__(self):
-        return BlockHeader.fmt.pack(self.raw_size, self.comp_size, self.chksum)
+    def close(self):
+        raise NotImplementedError()
 
-    def __repr__(self):
-        fmt = "BlockHeader(%d, %d, %0x)"
-        return fmt % (self.raw_size, self.comp_size, self.chksum)
-
-def load_block(env, block_db, decomp_fn, i):
+class DataStore(Closes):
     """
-    Load a block from the given file.
+    An abstraction layer over underlying data store.
     """
 
-    i_bin = idx_bin(i)
+    META_KEYS = frozenset([
+        "version", "block_length", "length", "comp_format", "comp_level"
+    ])
 
-    with env.begin(block_db, buffers=True) as txn:
-        buf = txn.get(i_bin)
-        if buf is None:
-            raise IOError("Block %d: doesn't exist" % i)
-        header = BlockHeader.frombuf(buf)
+    DEFAULT_PARAMS = {
+        "map_size": 2 ** 40,
+        "subdir": False,
+        "readonly": True,
+        "lock": False,
+        "max_dbs": 2,
+        "sync": False,
+        "metasync": False
+    }
 
-        block_comp = buffer(buf, BlockHeader.size, header.comp_size)
-        block_raw = decomp_fn(block_comp)
-        block_chksum = checksum(block_raw)
+    def __init__(self, fname, write=False, create=False):
+        self.closed = True
 
-    if len(block_raw) != header.raw_size:
-        raise IOError("Block %d: Size mismatch: %d != %d"
-                      % (i, len(block_raw), header.raw_size))
-    if block_chksum != header.chksum:
-        raise IOError("Block %d: Checksum mismatch: %0x != %0x"
-                      % (i, block_chksum, header.chksum))
+        self.fname = fname
+        self.write = write
+        self.create = create
 
-    block = unpack(block_raw)
-    return block
+        _exists = os.path.exists(fname)
+        if create and _exists:
+            raise IOError("File '%s' already exists" % fname)
+        if not create and not _exists:
+            raise IOError("File '%s' doesn't exist" % fname)
 
-def dump_block(env, block_db, comp_fn, comp_level, i, block):
+        params = dict(DataStore.DEFAULT_PARAMS)
+        params["readonly"] = not write
+        self.env = lmdb.open(self.fname, **params)
+        try:
+            self.meta_db = self.env.open_db("meta", create=create)
+            self.block_db = self.env.open_db("block", create=create)
+
+            self.txn = self.env.begin(write=write)
+
+            self.closed = False
+        except Exception:
+            self.env.close()
+            raise
+
+    def close(self):
+        if not self.closed:
+            self.txn.commit()
+            if self.write:
+                self.env.sync(True)
+            self.env.close()
+            self.closed = True
+
+    def get(self, i):
+        ib = struct.pack(">I", i)
+        return self.txn.get(ib, db=self.block_db)
+
+    def put(self, i, block):
+        ib = struct.pack(">I", i)
+        self.txn.put(ib, block, db=self.block_db)
+
+    def __getattr__(self, key):
+        if key not in DataStore.META_KEYS:
+            raise AttributeError("Unknown attribute: '%s'" % key)
+
+        value = self.txn.get(key, db=self.meta_db)
+        if value is None:
+            return None
+        else:
+            return unpack(value)
+
+    def __setattr__(self, key, value):
+        if key in DataStore.META_KEYS:
+            self.txn.put(key, pack(value), db=self.meta_db)
+        else:
+            self.__dict__[key] = value
+
+def comp_block(block_raw, comp_fn, comp_level):
     """
-    Write the block to the store.
+    Compress the block and add header.
     """
 
-    # Dont write empty blocks
-    # This happens when current block is empty and file is closed.
-    if not block:
-        return
-
-    i_bin = idx_bin(i)
-
-    block_raw = pack(block)
     block_chksum = checksum(block_raw)
     block_comp = comp_fn(block_raw, comp_level)
+    header = struct.pack("<II", len(block_raw), block_chksum)
+    block_hcomp = header + block_comp
 
-    header = BlockHeader(len(block_raw), len(block_comp), block_chksum)
-    buf = str(header) + block_comp
+    return block_hcomp
 
-    with env.begin(block_db, write=True) as txn:
-        txn.put(i_bin, buf)
+def decomp_block(block_hcomp, decomp_fn):
+    """
+    Decompress the block.
+    """
 
-class DatasetReader(object):
+    len_block_raw, stored_chksum = struct.unpack_from("<II", block_hcomp)
+    block_comp = buffer(block_hcomp, 8, len(block_hcomp) - 8)
+    block_raw = decomp_fn(block_comp)
+    block_chksum = checksum(block_raw)
+
+    if len(block_raw) != len_block_raw:
+        raise IOError("Size mismatch: %d != %d"
+                      % (len(block_raw), len_block_raw))
+    if block_chksum != stored_chksum:
+        raise IOError("Checksum mismatch: %0x != %0x"
+                      % (block_chksum, stored_chksum))
+
+    return block_raw
+
+class DatasetReader(Closes):
     """
     Read entries from a dataset file.
     """
 
-    def __init__(self, fname, lock=False):
+    def __init__(self, fname):
         self.closed = True
 
-        if not os.path.exists(fname):
-            raise IOError("File '%s' doesn't exist" % fname)
-
-        self.fname = fname
-
-        params = dict(DEFAULT_PARAMS)
-        params.update({"readonly": True, "lock": lock})
-        self.env = lmdb.open(self.fname, **params)
+        self.store = DataStore(fname)
         try:
-            self.meta_db = self.env.open_db("meta", create=False)
-            self.block_db = self.env.open_db("block", create=False)
+            if self.store.version != VERSION:
+                raise IOError("Invalid version: %d" % self.store.version)
 
-            with self.env.begin(self.meta_db) as txn:
-                version = unpack(txn.get("version"))
-                if version != VERSION:
-                    raise IOError("Invalid version: %d" % version)
+            self.block_length = self.store.block_length
+            self.length = self.store.length
 
-                self.block_length = unpack(txn.get("block_length"))
-                self.length = unpack(txn.get("length"))
+            self.comp_format = self.store.comp_format
+            self.comp_level = self.store.comp_level
 
-                self.comp_format = unpack(txn.get("comp_format"))
-                self.comp_level = unpack(txn.get("comp_level"))
-
-                try:
-                    self.decomp_fn = DECOMP_TABLE[self.comp_format]
-                except KeyError:
-                    raise IOError("Unknown compression: %s" % self.comp_format)
+            try:
+                self.decomp_fn = DECOMP_TABLE[self.comp_format]
+            except KeyError:
+                raise IOError("Unknown compression: %s" % self.comp_format)
 
             self.closed = False
-        except:
-            self.env.close()
+        except Exception:
+            self.store.close()
             raise
 
         # number of blocks already present in the dataset
@@ -210,26 +240,21 @@ class DatasetReader(object):
         self.cur_block_idx = -1
         self.cur_block = None
 
+    def close(self):
+        if not self.closed:
+            self.store.close()
+            self.closed = True
+
     def load_block(self, i):
         """
         Load a block from the given file.
         """
 
-        return load_block(self.env, self.block_db, self.decomp_fn, i)
-
-    def close(self):
-        if not self.closed:
-            self.env.close()
-            self.closed = True
-
-    def __del__(self):
-        self.close()
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        self.close()
+        block_hcomp = self.store.get(i)
+        if block_hcomp is None:
+            raise IOError("Block %d not in store" % i)
+        block_raw = decomp_block(block_hcomp, self.decomp_fn)
+        return unpack(block_raw)
 
     def __len__(self):
         return self.length
@@ -321,7 +346,7 @@ class DatasetReader(object):
         else:
             return self.get_idx(key)
 
-class DatasetWriter(object):
+class DatasetWriter(Closes):
     """
     Writes a dataset object to a file.
     """
@@ -340,41 +365,34 @@ class DatasetWriter(object):
         if not 1 <= comp_level <= 9:
             raise ValueError("Invalid compression level: %d" % comp_level)
 
-        _exists = os.path.exists(fname)
-        if create and _exists:
-            raise IOError("File '%s' already exists" % fname)
-        if not create and not _exists:
-            raise IOError("File '%s' doesn't exist" % fname)
-
         self.fname = fname
 
-        params = dict(DEFAULT_PARAMS)
-        params.update({"readonly": False, "lock": True})
-        self.env = lmdb.open(self.fname, **params)
+        self.store = DataStore(fname, write=True, create=create)
         try:
-            self.meta_db = self.env.open_db("meta")
-            self.block_db = self.env.open_db("block")
+            if create:
+                self.block_length = block_length
+                self.length = 0
 
-            with self.env.begin(self.meta_db) as txn:
-                version = unpack_default(txn.get("version"), VERSION)
-                if version != VERSION:
-                    raise IOError("Invalid version: %d" % version)
+                self.comp_format = comp_format
+                self.comp_level = comp_level
 
-                self.block_length = unpack_default(txn.get("block_length"), block_length)
-                self.length = unpack_default(txn.get("length"), 0)
-
-                self.comp_format = unpack_default(txn.get("comp_format"), comp_format)
-                self.comp_level = unpack_default(txn.get("comp_level"), comp_level)
-
-                self.comp_fn = COMP_TABLE[self.comp_format]
-                self.decomp_fn = DECOMP_TABLE[self.comp_format]
-
-            if self.length == 0:
                 self.write_meta(True)
+            else:
+                if self.store.version != VERSION:
+                    raise IOError("Invalid version: %d" % self.store.version)
+
+                self.block_length = self.store.block_length
+                self.length = self.store.length
+
+                self.comp_format = self.store.comp_format
+                self.comp_level = self.store.comp_level
+
+            self.comp_fn = COMP_TABLE[self.comp_format]
+            self.decomp_fn = DECOMP_TABLE[self.comp_format]
 
             self.closed = False
         except:
-            self.env.close()
+            self.store.close()
             raise
 
         # number of blocks already present in the dataset
@@ -387,33 +405,39 @@ class DatasetWriter(object):
             self.cur_block = self.load_block(self.num_blocks -1)
             self.num_blocks -= 1
 
+    def write_meta(self, full=False):
+        """
+        Write meta information.
+        """
+
+        if full:
+            self.store.version = VERSION
+            self.store.block_length = self.block_length
+            self.store.comp_format = self.comp_format
+            self.store.comp_level = self.comp_level
+
+        self.store.length = self.length
+
     def load_block(self, i):
         """
         Load a block from the given file.
         """
 
-        return load_block(self.env, self.block_db, self.decomp_fn, i)
+        block_hcomp = self.store.get(i)
+        if block_hcomp is None:
+            raise IOError("Block %d not in store" % i)
+        block_raw = decomp_block(block_hcomp, self.decomp_fn)
+        return unpack(block_raw)
 
     def dump_block(self, i, block):
         """
         Write the block to the store.
         """
 
-        dump_block(self.env, self.block_db, self.comp_fn, self.comp_level, i, block)
-
-    def write_meta(self, full=False):
-        """
-        Write meta information.
-        """
-
-        with self.env.begin(self.meta_db, write=True) as txn:
-            if full:
-                txn.put("version", pack(VERSION))
-                txn.put("block_length", pack(self.block_length))
-                txn.put("comp_format", pack(self.comp_format))
-                txn.put("comp_level", pack(self.comp_level))
-
-            txn.put("length", pack(self.length))
+        block_raw = pack(block)
+        block_hcomp = comp_block(block_raw, self.comp_fn, self.comp_level)
+        self.store.put(i, block_hcomp)
+        self.write_meta()
 
     def flush(self, force=False):
         """
@@ -426,9 +450,7 @@ class DatasetWriter(object):
         if not self.cur_block:
             return
 
-        # Dump the current block
         self.dump_block(self.num_blocks, self.cur_block)
-        self.write_meta()
 
         self.num_blocks += 1
         self.cur_block = []
@@ -436,19 +458,8 @@ class DatasetWriter(object):
     def close(self):
         if not self.closed:
             self.flush(force=True)
-
-            self.env.sync(True)
-            self.env.close()
+            self.store.close()
             self.closed = True
-
-    def __del__(self):
-        self.close()
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        self.close()
 
     def append(self, obj):
         """
