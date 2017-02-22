@@ -45,14 +45,11 @@ from msgpack import packb as _packb, unpackb as _unpackb
 def pack(x):
     return _packb(x, use_bin_type=True)
 
-def unpack(x):
-    return _unpackb(x, encoding="utf-8")
-
-def unpack_default(x, default):
+def unpack(x, default=None):
     if x is None:
         return default
     else:
-        return unpack(x)
+        return _unpackb(x, encoding="utf-8")
 
 # Setup the checksum function
 from zlib import adler32
@@ -106,10 +103,15 @@ class DataStore(Closes):
         "map_size": 2 ** 40,
         "subdir": False,
         "readonly": True,
-        "lock": False,
-        "max_dbs": 2,
+        "metasync": False,
         "sync": False,
-        "metasync": False
+        "mode": 0o644,
+        "readahead": False,
+        "writemap": True,
+        "meminit": False,
+        "map_async": True,
+        "max_dbs": 2,
+        "lock": False,
     }
 
     def __init__(self, fname, write=False, create=False):
@@ -132,7 +134,7 @@ class DataStore(Closes):
             self.meta_db = self.env.open_db("meta", create=create)
             self.block_db = self.env.open_db("block", create=create)
 
-            self.txn = self.env.begin(write=write)
+            self.txn = self.env.begin(write=write, buffers=True)
 
             self.closed = False
         except Exception:

@@ -30,8 +30,7 @@ def test_simple(tmpdir, test_data, block_length, comp_format, comp_level):
     Simple dset test.
     """
 
-    fname = "test-%s-%d.dset" % (comp_format, comp_level)
-    fname = tmpdir.join(fname).strpath
+    fname = tmpdir.join("test.dset").strpath
 
     params = {
         "block_length": block_length,
