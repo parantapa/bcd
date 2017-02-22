@@ -18,6 +18,7 @@
 Read and write PB's Dataset files.
 """
 
+import sys
 import os.path
 
 import struct
@@ -255,7 +256,10 @@ class DatasetReader(Closes):
         block_hcomp = self.store.get(i)
         if block_hcomp is None:
             raise IOError("Block %d not in store" % i)
-        block_raw = decomp_block(block_hcomp, self.decomp_fn)
+        try:
+            block_raw = decomp_block(block_hcomp, self.decomp_fn)
+        except IOError as e:
+            raise IOError("Block %d: %s", (i, e)), None, sys.exc_info()[2]
         return unpack(block_raw)
 
     def __len__(self):
@@ -428,7 +432,10 @@ class DatasetWriter(Closes):
         block_hcomp = self.store.get(i)
         if block_hcomp is None:
             raise IOError("Block %d not in store" % i)
-        block_raw = decomp_block(block_hcomp, self.decomp_fn)
+        try:
+            block_raw = decomp_block(block_hcomp, self.decomp_fn)
+        except IOError as e:
+            raise IOError("Block %d: %s", (i, e)), None, sys.exc_info()[2]
         return unpack(block_raw)
 
     def dump_block(self, i, block):
