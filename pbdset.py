@@ -117,9 +117,7 @@ class DataStore(Closes):
         "sync": False,
         "mode": 0o644,
         "readahead": False,
-        "writemap": True,
         "meminit": False,
-        "map_async": True,
         "max_dbs": 2,
         "lock": False,
     }

@@ -4,15 +4,21 @@ setup(
     name="PBDset",
     version="1.0.0a1",
 
-    py_modules=["pbdset", "test_pbdset"],
+    py_modules=["pbdset", "pbdset_tools", "test_pbdset"],
 
     install_requires=[
         "msgpack-python",
         "lmdb",
         "lz4",
         "backports.lzma",
-        "zstandard"
+        "zstandard",
+        "Click",
     ],
+
+    entry_points="""
+        [console_scripts]
+        dset-import=pbdset_tools:import_
+    """,
 
     setup_requires=['pytest-runner'],
 
