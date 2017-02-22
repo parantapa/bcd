@@ -30,6 +30,7 @@ from lz4 import compress as _lz4_comp, decompress as lz4_decomp
 from backports.lzma import compress as _xz_comp, \
                            decompress as _xz_decomp, \
                            CHECK_NONE
+from zstd import ZstdCompressor, ZstdDecompressor
 
 def lz4_comp(data, _):
     return _lz4_comp(data)
@@ -39,6 +40,20 @@ def xz_comp(data, level):
 
 def xz_decomp(data):
     return _xz_decomp(data)
+
+_zcomp = {}
+_zdecomp = ZstdDecompressor()
+
+def zstd_comp(data, level):
+    if level not in _zcomp:
+        _zcomp[level] = ZstdCompressor(level=level,
+                                       write_checksum=False,
+                                       write_content_size=True)
+
+    return _zcomp[level].compress(data)
+
+def zstd_decomp(data):
+    return _zdecomp.decompress(data)
 
 # We serialize using msgpack
 from msgpack import packb as _packb, unpackb as _unpackb
@@ -59,17 +74,11 @@ def checksum(data):
     return adler32(data) & 0xffffffff
 
 COMP_TABLE = {
-    "none": lambda data, level: data,
-    "zlib": zlib_comp,
-    "lz4": lz4_comp,
-    "xz": xz_comp,
-}
-
-DECOMP_TABLE = {
-    "none": lambda comp: comp,
-    "zlib": zlib_decomp,
-    "lz4": lz4_decomp,
-    "xz": xz_decomp
+    "none": (lambda data, level: data, lambda comp: comp),
+    "zlib": (zlib_comp, zlib_decomp),
+    "lz4": (lz4_comp, lz4_decomp),
+    "xz": (xz_comp, xz_decomp),
+    "zstd": (zstd_comp, zstd_decomp)
 }
 
 VERSION = 0.1
@@ -225,7 +234,7 @@ class DatasetReader(Closes):
             self.comp_level = self.store.comp_level
 
             try:
-                self.decomp_fn = DECOMP_TABLE[self.comp_format]
+                _, self.decomp_fn = COMP_TABLE[self.comp_format]
             except KeyError:
                 raise IOError("Unknown compression: %s" % self.comp_format)
 
@@ -365,7 +374,7 @@ class DatasetWriter(Closes):
         block_length = int(block_length)
         if block_length < 1:
             raise ValueError("Block length must be at-least 1")
-        if comp_format not in DECOMP_TABLE:
+        if comp_format not in COMP_TABLE:
             raise IOError("Unknown compression: %s" % comp_format)
         comp_level = int(comp_level)
         if not 1 <= comp_level <= 9:
@@ -393,8 +402,7 @@ class DatasetWriter(Closes):
                 self.comp_format = self.store.comp_format
                 self.comp_level = self.store.comp_level
 
-            self.comp_fn = COMP_TABLE[self.comp_format]
-            self.decomp_fn = DECOMP_TABLE[self.comp_format]
+            self.comp_fn, self.decomp_fn = COMP_TABLE[self.comp_format]
 
             self.closed = False
         except:

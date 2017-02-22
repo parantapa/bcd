@@ -7,10 +7,11 @@ setup(
     py_modules=["pbdset", "test_pbdset"],
 
     install_requires=[
-        'msgpack-python',
-        'lmdb',
-        'lz4',
-        'backports.lzma'
+        "msgpack-python",
+        "lmdb",
+        "lz4",
+        "backports.lzma",
+        "zstandard"
     ],
 
     setup_requires=['pytest-runner'],

@@ -9,7 +9,7 @@ import pytest
 
 import pbdset as ds
 
-@pytest.fixture(params=["none", "zlib", "lz4", "xz"])
+@pytest.fixture(params=["none", "zlib", "lz4", "xz", "zstd"])
 def comp_format(request):
     return request.param
 
